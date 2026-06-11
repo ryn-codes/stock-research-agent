@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Proxy API requests to the NestJS backend during development
   async rewrites() {
     return [
