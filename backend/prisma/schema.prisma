@@ -1,0 +1,340 @@
+// Prisma Schema for ResearchGPT
+// PostgreSQL 16 + pgvector
+// Implements all tables from Architecture Spec Section 9
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [uuid_ossp(map: "uuid-ossp")]
+}
+
+// =============================================================================
+// USERS
+// Session-based identity for V1, full auth in V2
+// =============================================================================
+model User {
+  id                String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  email             String?  @unique @db.VarChar(255)
+  displayName       String?  @map("display_name") @db.VarChar(100)
+  avatarUrl         String?  @map("avatar_url") @db.VarChar(500)
+  authProvider      String?  @map("auth_provider") @db.VarChar(50)
+  authProviderId    String?  @map("auth_provider_id") @db.VarChar(255)
+  isActive          Boolean  @default(true) @map("is_active")
+  tier              String   @default("free") @db.VarChar(20)
+  monthlyQueryCount Int      @default(0) @map("monthly_query_count")
+  monthlyQueryLimit Int      @default(20) @map("monthly_query_limit")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+
+  // Relations
+  researchRuns ResearchRun[]
+
+  @@index([email], name: "idx_users_email")
+  @@index([authProvider, authProviderId], name: "idx_users_auth")
+  @@map("users")
+}
+
+// =============================================================================
+// RESEARCH RUNS
+// The central entity for each research execution
+// =============================================================================
+model ResearchRun {
+  id              String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId          String?   @map("user_id") @db.Uuid
+  rawQuery        String    @map("raw_query") @db.VarChar(500)
+  ticker          String    @db.VarChar(10)
+  companyName     String    @map("company_name") @db.VarChar(255)
+  exchange        String?   @db.VarChar(20)
+  sector          String?   @db.VarChar(100)
+  industry        String?   @db.VarChar(100)
+  focusAreas      String[]  @map("focus_areas")
+  status          String    @default("pending") @db.VarChar(20)
+  errorMessage    String?   @map("error_message")
+  langsmithTraceId String?  @map("langsmith_trace_id") @db.VarChar(255)
+  totalDurationMs Int?      @map("total_duration_ms")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz()
+
+  // Relations
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tasks         ResearchTask[]
+  evidence      Evidence[]
+  insights      Insight[]
+  costRecords   CostRecord[]
+  apiUsageLogs  ApiUsageLog[]
+  report        Report?
+
+  @@index([userId], name: "idx_runs_user")
+  @@index([ticker], name: "idx_runs_ticker")
+  @@index([status], name: "idx_runs_status")
+  @@index([createdAt(sort: Desc)], name: "idx_runs_created")
+  @@index([userId, createdAt(sort: Desc)], name: "idx_runs_user_created")
+  @@map("research_runs")
+}
+
+// =============================================================================
+// RESEARCH TASKS
+// Individual tasks assigned by the Planner Agent
+// =============================================================================
+model ResearchTask {
+  id           String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId        String    @map("run_id") @db.Uuid
+  agentType    String    @map("agent_type") @db.VarChar(20)
+  taskType     String    @map("task_type") @db.VarChar(50)
+  priority     Int
+  status       String    @default("pending") @db.VarChar(20)
+  dependsOn    String[]  @map("depends_on") @db.Uuid
+  parameters   Json      @default("{}")
+  result       Json?
+  errorMessage String?   @map("error_message")
+  inputTokens  Int?      @map("input_tokens")
+  outputTokens Int?      @map("output_tokens")
+  modelUsed    String?   @map("model_used") @db.VarChar(50)
+  startedAt    DateTime? @map("started_at") @db.Timestamptz()
+  completedAt  DateTime? @map("completed_at") @db.Timestamptz()
+  durationMs   Int?      @map("duration_ms")
+
+  // Relations
+  run ResearchRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId], name: "idx_tasks_run")
+  @@index([runId, status], name: "idx_tasks_status")
+  @@index([agentType], name: "idx_tasks_agent")
+  @@map("research_tasks")
+}
+
+// =============================================================================
+// EVIDENCE
+// Raw data collected by research agents
+// =============================================================================
+model Evidence {
+  id             String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId          String    @map("run_id") @db.Uuid
+  sourceAgent    String    @map("source_agent") @db.VarChar(20)
+  evidenceType   String    @map("evidence_type") @db.VarChar(30)
+  content        String
+  structuredData Json?     @map("structured_data")
+  sourceUrl      String    @map("source_url") @db.VarChar(2000)
+  sourceName     String?   @map("source_name") @db.VarChar(255)
+  confidence     Decimal   @db.Decimal(3, 2)
+  relevanceScore Decimal?  @map("relevance_score") @db.Decimal(3, 2)
+  dataAsOf       DateTime? @map("data_as_of") @db.Timestamptz()
+  // pgvector embedding — managed via raw SQL migration
+  // embedding    Unsupported("vector(1536)")?
+  collectedAt    DateTime  @default(now()) @map("collected_at") @db.Timestamptz()
+
+  // Relations
+  run             ResearchRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  insightEvidence InsightEvidence[]
+
+  @@index([runId], name: "idx_evidence_run")
+  @@index([sourceAgent], name: "idx_evidence_agent")
+  @@index([evidenceType], name: "idx_evidence_type")
+  @@map("evidence")
+}
+
+// =============================================================================
+// INSIGHTS
+// Synthesized conclusions from evidence
+// =============================================================================
+model Insight {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId       String   @map("run_id") @db.Uuid
+  insightType String   @map("insight_type") @db.VarChar(30)
+  title       String   @db.VarChar(200)
+  content     String
+  confidence  Decimal  @db.Decimal(3, 2)
+  impact      String?  @db.VarChar(10)
+  timeHorizon String?  @map("time_horizon") @db.VarChar(15)
+  generatedBy String   @map("generated_by") @db.VarChar(20)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  // Relations
+  run             ResearchRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  insightEvidence InsightEvidence[]
+
+  @@index([runId], name: "idx_insights_run")
+  @@index([insightType], name: "idx_insights_type")
+  @@map("insights")
+}
+
+// =============================================================================
+// INSIGHT <-> EVIDENCE JUNCTION TABLE
+// =============================================================================
+model InsightEvidence {
+  insightId    String @map("insight_id") @db.Uuid
+  evidenceId   String @map("evidence_id") @db.Uuid
+  relationship String @default("supports") @db.VarChar(20)
+
+  // Relations
+  insight  Insight  @relation(fields: [insightId], references: [id], onDelete: Cascade)
+  evidence Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@id([insightId, evidenceId])
+  @@index([evidenceId], name: "idx_ie_evidence")
+  @@map("insight_evidence")
+}
+
+// =============================================================================
+// REPORTS
+// Final assembled research reports
+// =============================================================================
+model Report {
+  id                    String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId                 String   @unique @map("run_id") @db.Uuid
+  ticker                String   @db.VarChar(10)
+  companyName           String   @map("company_name") @db.VarChar(255)
+  exchange              String?  @db.VarChar(20)
+  confidenceOverall     Int      @map("confidence_overall")
+  confidenceBreakdown   Json     @map("confidence_breakdown")
+  recommendation        String?  @db.VarChar(20)
+  totalInputTokens      Int      @map("total_input_tokens")
+  totalOutputTokens     Int      @map("total_output_tokens")
+  totalCostUsd          Decimal  @map("total_cost_usd") @db.Decimal(8, 4)
+  generationTimeSeconds Decimal  @map("generation_time_seconds") @db.Decimal(8, 2)
+  modelsUsed            String[] @map("models_used")
+  dataSourcesUsed       String[] @map("data_sources_used")
+  disclaimer            String
+  reportVersion         String   @default("1.0.0") @map("report_version") @db.VarChar(20)
+  generatedAt           DateTime @default(now()) @map("generated_at") @db.Timestamptz()
+
+  // Relations
+  run              ResearchRun     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sections         ReportSection[]
+  citations        Citation[]
+  evaluationResult EvaluationResult?
+
+  @@index([runId], name: "idx_reports_run")
+  @@index([ticker], name: "idx_reports_ticker")
+  @@index([generatedAt(sort: Desc)], name: "idx_reports_generated")
+  @@map("reports")
+}
+
+// =============================================================================
+// REPORT SECTIONS
+// Individual sections of the report (exactly 10 per report)
+// =============================================================================
+model ReportSection {
+  id           String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  reportId     String  @map("report_id") @db.Uuid
+  sectionId    String  @map("section_id") @db.VarChar(30)
+  title        String  @db.VarChar(100)
+  sectionOrder Int     @map("section_order")
+  content      String
+  generatedBy  String  @map("generated_by") @db.VarChar(20)
+  hasDataGap   Boolean @default(false) @map("has_data_gap")
+  inputTokens  Int?    @map("input_tokens")
+  outputTokens Int?    @map("output_tokens")
+
+  // Relations
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, sectionId])
+  @@index([reportId], name: "idx_sections_report")
+  @@map("report_sections")
+}
+
+// =============================================================================
+// CITATIONS
+// Source references for report claims
+// =============================================================================
+model Citation {
+  id           String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  reportId     String   @map("report_id") @db.Uuid
+  displayId    String   @map("display_id") @db.VarChar(10)
+  title        String   @db.VarChar(500)
+  sourceName   String   @map("source_name") @db.VarChar(255)
+  url          String   @db.VarChar(2000)
+  citationType String   @map("citation_type") @db.VarChar(20)
+  accessedAt   DateTime @default(now()) @map("accessed_at") @db.Timestamptz()
+
+  // Relations
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, displayId])
+  @@index([reportId], name: "idx_citations_report")
+  @@map("citations")
+}
+
+// =============================================================================
+// COST RECORDS
+// Per-agent cost tracking
+// =============================================================================
+model CostRecord {
+  id            String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId         String   @map("run_id") @db.Uuid
+  agentType     String   @map("agent_type") @db.VarChar(20)
+  model         String   @db.VarChar(50)
+  inputTokens   Int      @map("input_tokens")
+  outputTokens  Int      @map("output_tokens")
+  inputCostUsd  Decimal  @map("input_cost_usd") @db.Decimal(8, 6)
+  outputCostUsd Decimal  @map("output_cost_usd") @db.Decimal(8, 6)
+  totalCostUsd  Decimal  @map("total_cost_usd") @db.Decimal(8, 4)
+  apiCallType   String?  @map("api_call_type") @db.VarChar(50)
+  recordedAt    DateTime @default(now()) @map("recorded_at") @db.Timestamptz()
+
+  // Relations
+  run ResearchRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId], name: "idx_costs_run")
+  @@index([agentType], name: "idx_costs_agent")
+  @@index([recordedAt(sort: Desc)], name: "idx_costs_recorded")
+  @@map("cost_records")
+}
+
+// =============================================================================
+// API USAGE LOGS
+// External API call tracking
+// =============================================================================
+model ApiUsageLog {
+  id                String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  runId             String?  @map("run_id") @db.Uuid
+  apiProvider       String   @map("api_provider") @db.VarChar(50)
+  endpoint          String   @db.VarChar(255)
+  httpMethod        String   @default("GET") @map("http_method") @db.VarChar(10)
+  statusCode        Int?     @map("status_code")
+  responseTimeMs    Int?     @map("response_time_ms")
+  requestSizeBytes  Int?     @map("request_size_bytes")
+  responseSizeBytes Int?     @map("response_size_bytes")
+  errorMessage      String?  @map("error_message")
+  calledAt          DateTime @default(now()) @map("called_at") @db.Timestamptz()
+
+  // Relations
+  run ResearchRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([runId], name: "idx_api_logs_run")
+  @@index([apiProvider], name: "idx_api_logs_provider")
+  @@index([calledAt(sort: Desc)], name: "idx_api_logs_called")
+  @@map("api_usage_logs")
+}
+
+// =============================================================================
+// EVALUATION RESULTS
+// Quality scoring from Section 11 of the architecture spec
+// =============================================================================
+model EvaluationResult {
+  id                String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  reportId          String   @unique @map("report_id") @db.Uuid
+  coverageScore     Int      @map("coverage_score")
+  accuracyScore     Int      @map("accuracy_score")
+  citationScore     Int      @map("citation_score")
+  confidenceScore   Int      @map("confidence_score")
+  hallucinationScore Int     @map("hallucination_score")
+  compositeScore    Int      @map("composite_score")
+  claimCount        Int?     @map("claim_count")
+  unsupportedClaims Int?     @map("unsupported_claims")
+  details           Json?
+  evaluatedAt       DateTime @default(now()) @map("evaluated_at") @db.Timestamptz()
+
+  // Relations
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId], name: "idx_eval_report")
+  @@index([compositeScore], name: "idx_eval_composite")
+  @@map("evaluation_results")
+}
