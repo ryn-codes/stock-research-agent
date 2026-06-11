@@ -1,0 +1,26 @@
+name: Create/Delete Branch for Pull Request
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+jobs:
+  manage-neon-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Neon Branch
+        if: github.event.action == 'opened'
+        uses: neondatabase/create-branch-action@v5
+        id: create-branch
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch_name: pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+      - name: Delete Neon Branch
+        if: github.event.action == 'closed'
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch: pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
